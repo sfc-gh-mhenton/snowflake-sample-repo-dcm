@@ -4,17 +4,17 @@ default_target: DEV
 
 targets:
   DEV:
-    account_identifier: SFPSCOGS-RNB85270
+    account_identifier: SFPSCOGS-MHENTON_AWS_1
     project_name: INTELLIGENCE_DEV_DB.AGENTS.INTELLIGENCE_PROJECT_DCM_DEV
     project_owner: CICD_DEPLOYER
     templating_config: DEV
   TEST:
-    account_identifier: SFPSCOGS-RNB85270
+    account_identifier: SFPSCOGS-MHENTON_AWS_1
     project_name: INTELLIGENCE_TEST_DB.AGENTS.INTELLIGENCE_PROJECT_DCM_TEST
     project_owner: CICD_DEPLOYER
     templating_config: TEST
   PROD:
-    account_identifier: SFPSCOGS-RNB85270
+    account_identifier: SFPSCOGS-MHENTON_AWS_1
     project_name: INTELLIGENCE_DB.AGENTS.INTELLIGENCE_PROJECT_DCM
     project_owner: CICD_DEPLOYER
     templating_config: PROD
