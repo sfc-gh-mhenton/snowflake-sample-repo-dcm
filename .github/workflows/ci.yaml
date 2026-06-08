@@ -1,0 +1,55 @@
+name: CI - Validate
+
+on:
+  pull_request:
+    paths:
+      - 'dcm/**'
+      - 'snowflake/**'
+      - 'infrastructure/**'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install snowflake-cli pyyaml yamllint
+
+      - name: Configure Snowflake connection
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+        run: |
+          echo "$SNOWFLAKE_PRIVATE_KEY" > /tmp/rsa_key.p8
+          chmod 600 /tmp/rsa_key.p8
+          mkdir -p ~/.snowflake
+          printf '[default]\naccount = "%s"\nuser = "%s"\nrole = "%s"\nwarehouse = "%s"\nauthenticator = "SNOWFLAKE_JWT"\nprivate_key_path = "/tmp/rsa_key.p8"\n' \
+            "$SNOWFLAKE_ACCOUNT" "$SNOWFLAKE_USER" "$SNOWFLAKE_ROLE" "$SNOWFLAKE_WAREHOUSE" \
+            > ~/.snowflake/connections.toml
+          chmod 600 ~/.snowflake/connections.toml
+
+      - name: Lint YAML files
+        run: yamllint -d relaxed dcm/manifest.yml snowflake/agents/ infrastructure/
+
+      - name: Validate agent specifications
+        run: python infrastructure/scripts/validate_agent_spec.py snowflake/agents/
+
+      - name: Analyze DCM project (static validation)
+        working-directory: dcm
+        run: |
+          snow dcm raw-analyze --target DEV -c default
+          echo "DCM analysis passed - definitions are valid"
+
+      - name: Verify Snowflake connectivity
+        run: |
+          snow sql -q "SELECT CURRENT_ACCOUNT(), CURRENT_ROLE(), CURRENT_DATABASE();" -c default
+          echo "Snowflake connection verified"

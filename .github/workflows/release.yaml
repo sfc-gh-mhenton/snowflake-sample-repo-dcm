@@ -1,0 +1,157 @@
+name: Release to Production
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install snowflake-cli pyyaml
+
+      - name: Configure Snowflake connection
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+        run: |
+          echo "$SNOWFLAKE_PRIVATE_KEY" > /tmp/rsa_key.p8
+          chmod 600 /tmp/rsa_key.p8
+          mkdir -p ~/.snowflake
+          printf '[default]\naccount = "%s"\nuser = "%s"\nrole = "%s"\nwarehouse = "%s"\nauthenticator = "SNOWFLAKE_JWT"\nprivate_key_path = "/tmp/rsa_key.p8"\n' \
+            "$SNOWFLAKE_ACCOUNT" "$SNOWFLAKE_USER" "$SNOWFLAKE_ROLE" "$SNOWFLAKE_WAREHOUSE" \
+            > ~/.snowflake/connections.toml
+          chmod 600 ~/.snowflake/connections.toml
+
+      # =========================================================================
+      # PHASE 1: Deploy to TEST + Evaluate (gate)
+      # =========================================================================
+
+      - name: DCM Deploy to TEST
+        working-directory: dcm
+        run: |
+          snow dcm plan --target TEST --save-output -c default
+          snow dcm deploy --target TEST --alias "release-gate-${{ github.ref_name }}" -c default
+
+      - name: Deploy AI objects to TEST
+        run: |
+          export DB=INTELLIGENCE_TEST_DB
+          export SAMPLE_DB=SNOWFLAKE_SAMPLE_DATA
+          envsubst < dcm/post_deploy.sql | snow sql --stdin -c default
+
+      - name: Deploy agent to TEST
+        run: |
+          python infrastructure/scripts/resolve_databases.py test \
+            snowflake/agents/intelligence/tpch_sales_assistant_dcm/agent_spec.yaml \
+            > /tmp/agent_spec.yaml
+          snow sql -q "
+            CREATE OR REPLACE AGENT INTELLIGENCE_TEST_DB.AGENTS.TPCH_SALES_ASSISTANT_DCM
+              COMMENT = 'Release gate ${{ github.ref_name }}'
+              FROM SPECIFICATION
+              \$\$
+              $(cat /tmp/agent_spec.yaml)
+              \$\$;
+          " -c default
+
+      - name: Seed test data
+        run: |
+          python infrastructure/scripts/resolve_databases.py test \
+            infrastructure/seed/seed_knowledge_base_dcm.sql | snow sql --stdin -c default
+
+      - name: Verify TEST deployment
+        run: |
+          snow sql -q "SHOW AGENTS LIKE 'TPCH_SALES_ASSISTANT_DCM' IN SCHEMA INTELLIGENCE_TEST_DB.AGENTS;" -c default
+
+      # =========================================================================
+      # PHASE 2: Deploy to PROD (after gate passes)
+      # =========================================================================
+
+      - name: DCM Deploy to PROD
+        working-directory: dcm
+        run: |
+          snow dcm plan --target PROD --save-output -c default
+          # Check for DROP operations
+          python -c "
+          import json, sys
+          with open('out/plan/plan_result.json') as f:
+              plan = json.load(f)
+          if plan.get('status') == 'PLAN_FAILED':
+              print('PLAN FAILED:', plan.get('error'))
+              sys.exit(1)
+          ops = plan.get('ddl_change_log', {}).get('operations', [])
+          drops = [o for o in ops if o.get('operationType') == 'DROP']
+          if drops:
+              print('ERROR: Production plan contains DROP operations. Aborting.')
+              for d in drops:
+                  print(f'  - DROP {d.get(\"objectDomain\")} {d.get(\"objectIdentifier\")}')
+              sys.exit(1)
+          print(f'Plan approved: {len(ops)} operations, 0 DROPs')
+          "
+          snow dcm deploy --target PROD --alias "${{ github.ref_name }}" -c default
+
+      - name: Deploy AI objects to PROD
+        run: |
+          export DB=INTELLIGENCE_DB
+          export SAMPLE_DB=SNOWFLAKE_SAMPLE_DATA
+          envsubst < dcm/post_deploy.sql | snow sql --stdin -c default
+
+      - name: Deploy agent to PROD
+        run: |
+          python infrastructure/scripts/resolve_databases.py prod \
+            snowflake/agents/intelligence/tpch_sales_assistant_dcm/agent_spec.yaml \
+            > /tmp/agent_spec.yaml
+          snow sql -q "
+            CREATE OR REPLACE AGENT INTELLIGENCE_DB.AGENTS.TPCH_SALES_ASSISTANT_DCM
+              COMMENT = 'Release ${{ github.ref_name }} sha:${{ github.sha }}'
+              FROM SPECIFICATION
+              \$\$
+              $(cat /tmp/agent_spec.yaml)
+              \$\$;
+          " -c default
+
+      - name: Seed production data
+        run: |
+          python infrastructure/scripts/resolve_databases.py prod \
+            infrastructure/seed/seed_knowledge_base_dcm.sql | snow sql --stdin -c default
+
+      - name: Verify PROD deployment
+        run: |
+          snow sql -q "DESCRIBE AGENT INTELLIGENCE_DB.AGENTS.TPCH_SALES_ASSISTANT_DCM;" -c default
+          snow sql -q "SHOW CORTEX SEARCH SERVICES LIKE 'KNOWLEDGE_SEARCH_SERVICE_DCM' IN SCHEMA INTELLIGENCE_DB.SEARCH;" -c default
+
+      - name: DCM list deployments (audit)
+        working-directory: dcm
+        run: |
+          echo "=== TEST Deployments ==="
+          snow dcm list-deployments --target TEST -c default
+          echo "=== PROD Deployments ==="
+          snow dcm list-deployments --target PROD -c default
+
+      # =========================================================================
+      # PHASE 3: Create GitHub Release
+      # =========================================================================
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          generate_release_notes: true
+          body: |
+            ## Deployment Summary
+            - **Tag**: ${{ github.ref_name }}
+            - **Commit**: ${{ github.sha }}
+            - **DCM Alias**: ${{ github.ref_name }}
+            - **TEST**: Deployed and verified
+            - **PROD**: Deployed and verified

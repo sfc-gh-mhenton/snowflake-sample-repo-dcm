@@ -1,0 +1,5 @@
+-- Access control: Grants for DCM-managed objects
+-- These use imperative SQL syntax (not DEFINE)
+
+GRANT ALL ON TABLE {{db}}.SEARCH.KNOWLEDGE_BASE_DCM TO ROLE CICD_DEPLOYER;
+GRANT USAGE ON FUNCTION {{db}}.TOOLS.GET_CUSTOMER_TIER_DCM(VARCHAR) TO ROLE CICD_DEPLOYER;

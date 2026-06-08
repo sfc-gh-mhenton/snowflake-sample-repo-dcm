@@ -1,0 +1,151 @@
+name: Deploy and Evaluate
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'dcm/**'
+      - 'snowflake/**'
+      - 'infrastructure/**'
+
+jobs:
+  deploy-and-evaluate:
+    runs-on: ubuntu-latest
+    env:
+      TARGET_ENV: test
+      DCM_TARGET: TEST
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install snowflake-cli pyyaml
+
+      - name: Configure Snowflake connection
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+        run: |
+          echo "$SNOWFLAKE_PRIVATE_KEY" > /tmp/rsa_key.p8
+          chmod 600 /tmp/rsa_key.p8
+          mkdir -p ~/.snowflake
+          printf '[default]\naccount = "%s"\nuser = "%s"\nrole = "%s"\nwarehouse = "%s"\nauthenticator = "SNOWFLAKE_JWT"\nprivate_key_path = "/tmp/rsa_key.p8"\n' \
+            "$SNOWFLAKE_ACCOUNT" "$SNOWFLAKE_USER" "$SNOWFLAKE_ROLE" "$SNOWFLAKE_WAREHOUSE" \
+            > ~/.snowflake/connections.toml
+          chmod 600 ~/.snowflake/connections.toml
+
+      - name: Resolve environment variables
+        id: resolve
+        run: |
+          DATABASE=$(python -c "
+          import yaml
+          with open('infrastructure/databases.yaml') as f:
+              config = yaml.safe_load(f)
+          print(config['databases']['DATABASE']['$TARGET_ENV'])
+          ")
+          SAMPLE_DB=$(python -c "
+          import yaml
+          with open('infrastructure/databases.yaml') as f:
+              config = yaml.safe_load(f)
+          print(config['databases']['SNOWFLAKE_SAMPLE_DATA']['$TARGET_ENV'])
+          ")
+          echo "database=$DATABASE" >> $GITHUB_OUTPUT
+          echo "sample_db=$SAMPLE_DB" >> $GITHUB_OUTPUT
+          echo "Deploying to $DATABASE (env: $TARGET_ENV)"
+
+      # =========================================================================
+      # PHASE 1: DCM Infrastructure Deploy (schemas, tables, functions, grants)
+      # =========================================================================
+
+      - name: DCM Plan (preview infrastructure changes)
+        working-directory: dcm
+        run: |
+          snow dcm plan --target $DCM_TARGET --save-output -c default
+          echo "--- DCM Plan Complete ---"
+          # Display plan summary
+          if [ -f out/plan/plan_result.json ]; then
+            python -c "
+          import json
+          with open('out/plan/plan_result.json') as f:
+              plan = json.load(f)
+          if plan.get('status') == 'PLAN_FAILED':
+              print('PLAN FAILED:', plan.get('error'))
+              exit(1)
+          ops = plan.get('ddl_change_log', {}).get('operations', [])
+          creates = [o for o in ops if o.get('operationType') == 'CREATE']
+          alters = [o for o in ops if o.get('operationType') == 'ALTER']
+          drops = [o for o in ops if o.get('operationType') == 'DROP']
+          print(f'Plan: {len(creates)} CREATE, {len(alters)} ALTER, {len(drops)} DROP')
+          if drops:
+              print('WARNING: DROP operations detected!')
+              for d in drops:
+                  print(f'  - DROP {d.get(\"objectDomain\")} {d.get(\"objectIdentifier\")}')
+          "
+          fi
+
+      - name: DCM Deploy (apply infrastructure changes)
+        working-directory: dcm
+        run: |
+          snow dcm deploy --target $DCM_TARGET --alias "ci-${{ github.run_number }}" -c default
+          echo "DCM deploy complete"
+
+      # =========================================================================
+      # PHASE 2: Seed Data (after table exists)
+      # =========================================================================
+
+      - name: Seed knowledge base data
+        run: |
+          DATABASE="${{ steps.resolve.outputs.database }}"
+          python infrastructure/scripts/resolve_databases.py "$TARGET_ENV" \
+            infrastructure/seed/seed_knowledge_base_dcm.sql | snow sql --stdin -c default
+
+      # =========================================================================
+      # PHASE 3: Post-Deploy AI Objects (semantic views, search, agents)
+      # =========================================================================
+
+      - name: Deploy AI objects (post_deploy.sql)
+        run: |
+          export DB="${{ steps.resolve.outputs.database }}"
+          export SAMPLE_DB="${{ steps.resolve.outputs.sample_db }}"
+          envsubst < dcm/post_deploy.sql | snow sql --stdin -c default
+          echo "AI objects deployed"
+
+      - name: Deploy agent
+        run: |
+          DATABASE="${{ steps.resolve.outputs.database }}"
+          python infrastructure/scripts/resolve_databases.py "$TARGET_ENV" \
+            snowflake/agents/intelligence/tpch_sales_assistant_dcm/agent_spec.yaml \
+            > /tmp/agent_spec.yaml
+          snow sql -q "
+            CREATE OR REPLACE AGENT ${DATABASE}.AGENTS.TPCH_SALES_ASSISTANT_DCM
+              COMMENT = 'DCM deploy $TARGET_ENV - ci-${{ github.run_number }} sha:${{ github.sha }}'
+              FROM SPECIFICATION
+              \$\$
+              $(cat /tmp/agent_spec.yaml)
+              \$\$;
+          " -c default
+
+      # =========================================================================
+      # PHASE 4: Verify
+      # =========================================================================
+
+      - name: Verify deployment
+        run: |
+          DATABASE="${{ steps.resolve.outputs.database }}"
+          snow sql -q "SHOW AGENTS LIKE 'TPCH_SALES_ASSISTANT_DCM' IN SCHEMA ${DATABASE}.AGENTS;" -c default
+          snow sql -q "SHOW CORTEX SEARCH SERVICES LIKE 'KNOWLEDGE_SEARCH_SERVICE_DCM' IN SCHEMA ${DATABASE}.SEARCH;" -c default
+          snow sql -q "SHOW SEMANTIC VIEWS LIKE 'TPCH_SALES_VIEW_DCM' IN SCHEMA ${DATABASE}.ANALYTICS;" -c default
+
+      - name: DCM list deployments (audit trail)
+        working-directory: dcm
+        run: snow dcm list-deployments --target $DCM_TARGET -c default

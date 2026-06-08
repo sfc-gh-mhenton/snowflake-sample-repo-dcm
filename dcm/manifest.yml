@@ -1,0 +1,33 @@
+manifest_version: 2
+type: DCM_PROJECT
+default_target: DEV
+
+targets:
+  DEV:
+    account_identifier: SFPSCOGS-RNB85270
+    project_name: INTELLIGENCE_DEV_DB.AGENTS.INTELLIGENCE_PROJECT_DCM_DEV
+    project_owner: CICD_DEPLOYER
+    templating_config: DEV
+  TEST:
+    account_identifier: SFPSCOGS-RNB85270
+    project_name: INTELLIGENCE_TEST_DB.AGENTS.INTELLIGENCE_PROJECT_DCM_TEST
+    project_owner: CICD_DEPLOYER
+    templating_config: TEST
+  PROD:
+    account_identifier: SFPSCOGS-RNB85270
+    project_name: INTELLIGENCE_DB.AGENTS.INTELLIGENCE_PROJECT_DCM
+    project_owner: CICD_DEPLOYER
+    templating_config: PROD
+
+templating:
+  defaults:
+    db: INTELLIGENCE_DEV_DB
+    sample_db: SNOWFLAKE_SAMPLE_DATA
+    wh: COMPUTE_WH
+  configurations:
+    DEV:
+      db: INTELLIGENCE_DEV_DB
+    TEST:
+      db: INTELLIGENCE_TEST_DB
+    PROD:
+      db: INTELLIGENCE_DB

@@ -1,0 +1,59 @@
+models:
+  orchestration: auto
+
+orchestration:
+  budget:
+    seconds: 30
+    tokens: 16000
+
+instructions:
+  response: |
+    You are a Sales Analytics Assistant for a wholesale parts distributor.
+    Respond professionally and concisely. Use bullet points for lists.
+    Always cite the data source when presenting numbers.
+    Format currency values with $ and two decimal places.
+    When presenting comparisons, highlight the percentage change.
+    If results contain more than 5 rows, summarize the key insights first.
+  orchestration: |
+    For revenue, order, customer, or product data questions, use SalesAnalytics.
+    For policy, process, or documentation questions, use KnowledgeSearch.
+    For questions that involve both data and policy, query data first then search docs for context.
+    Never guess at numbers - always query the data.
+    If a question is ambiguous, ask for clarification before querying.
+  sample_questions:
+    - question: "What is total revenue by region?"
+    - question: "Who are our top 10 customers by revenue?"
+    - question: "What is our order fulfillment process?"
+    - question: "How many orders are still open?"
+    - question: "Compare revenue this year vs last year"
+    - question: "What discount rules apply to large orders?"
+
+tools:
+  - tool_spec:
+      type: "cortex_analyst_text_to_sql"
+      name: "SalesAnalytics"
+      description: |
+        Queries structured sales data from TPC-H including orders, line items,
+        customers, nations, and regions. Use for any quantitative question about
+        revenue, order counts, customer metrics, discounts, or regional performance.
+  - tool_spec:
+      type: "cortex_search"
+      name: "KnowledgeSearch"
+      description: |
+        Searches internal documentation including order fulfillment processes,
+        customer segmentation policies, discount rules, returns policy, and
+        regional sales strategy. Use for questions about how things work,
+        what policies say, or finding process documentation.
+  - tool_spec:
+      type: "data_to_chart"
+      name: "data_to_chart"
+      description: "Generates visualizations and charts from query results"
+
+tool_resources:
+  SalesAnalytics:
+    semantic_view: "__DATABASE__.ANALYTICS.TPCH_SALES_VIEW_DCM"
+  KnowledgeSearch:
+    name: "__DATABASE__.SEARCH.KNOWLEDGE_SEARCH_SERVICE_DCM"
+    max_results: "5"
+    title_column: "title"
+    id_column: "doc_id"
